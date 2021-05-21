@@ -39,3 +39,9 @@ libs/*
 
 # Generated files
 /*.db
+
+*.egg-info
+.vscode
+.idea
+venv/*
+

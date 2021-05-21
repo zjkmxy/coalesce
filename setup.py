@@ -42,7 +42,7 @@ setup(
     packages=find_packages(exclude=['tests', 'tests.*']),
     python_requires='>3.3',
 
-    install_requires=['ecc', 'cipher21', 'py-radix', 'charm-crypto', 'python-ndn', 'pickledb'],
+    install_requires=['cipher21', 'py-radix', 'python-ndn', 'pickledb'],
 
     extras_require={  # Optional
         'test': ['coverage'],
