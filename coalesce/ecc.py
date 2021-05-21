@@ -201,11 +201,11 @@ class ECPoint:
         else:
             raise Exception("Bad parameters in ECPoint constructor!")
 
-    def __cmp__(self, b):
-        if (self.x == b.x and self.y == b.y):
-            return 0
+    def __eq__(self, b):
+        if self.x == b.x and self.y == b.y:
+            return True
         else:
-            return 1
+            return False
 
     def __neg__(self):
         return ECPoint(self.x, self.ecc.p - self.y, self.ecc)
