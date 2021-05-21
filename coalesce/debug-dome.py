@@ -14,22 +14,45 @@ GEN_P256 = ECC.EccPoint(x=SECP256R1_GX, y=SECP256R1_GY, curve='secp256r1')
 
 
 def f_k_int_x(k: bytes, x: int) -> bytes:
-    """
-    f_k^{int}(x)
+    r"""
+    f_k^{int}(x) = (AES(k, x+1) XOR (x+1)) || (AES(k, x+2) XOR (x+2)) || (AES(k, x+3) XOR (x+3))
+
+    :param k: the AES key (128-bit).
+    :type k: bytes
+    :param x: the input block (128-bit).
+    :type x: int
+    :return: the big-endian integer representation of f_k^{int}(x)
+    :rtype: bytes
     """
     aes_obj = AES.new(k, AES.MODE_ECB)
-    s = b''
+    ret = [b'', b'', b'']
     for i in range(1, 4):
         xpi = (x + i).to_bytes(16, 'big')
         aes_xpi = aes_obj.encrypt(xpi)
         blki_int = int.from_bytes(xpi, 'big') ^ int.from_bytes(aes_xpi, 'big')
-        blki = blki_int.to_bytes(16, 'big')
-        s += blki
+        ret[i-1] = blki_int.to_bytes(16, 'big')
 
-    return s
+    return b''.join(ret)
 
 
-def bfexpandkey(i: int, j: int, exp: bytes, seed_prv: int, exp_type: str = "cert") -> typing.Tuple[int, ECC.EccPoint]:
+def bfexpandkey(i: int, j: int, exp: bytes, seed_prv: int, exp_type: str = 'cert') -> typing.Tuple[int, ECC.EccPoint]:
+    r"""
+    Butterfly expansion for 'cert' and 'enc' keys
+
+    :param i: the ``i`` value for the corresponding certificate
+    :type i: int
+    :param j: the ``j`` value for the corresponding certificate
+    :type j: int
+    :param exp: expansion value. An AES key (128-bit).
+    :type exp: bytes
+    :param seed_prv: the seed private key (1~SECP256R1_N-1).
+    :type seed_prv: int
+    :param exp_type: the type of key expansion. "cert" (default) or "enc"
+    :type exp_type: str
+    :return: a pair ``(pri, pub)`` of the private and the public key,
+        satisfying ``GEN_P256 * pri == pub``.
+    :rtype: (int, ECC.EccPoint)
+    """
     if exp_type == 'cert':
         p0 = 0
     elif exp_type == 'enc':
@@ -37,7 +60,9 @@ def bfexpandkey(i: int, j: int, exp: bytes, seed_prv: int, exp_type: str = "cert
     else:
         raise ValueError(f'Unsupported expansion type: {exp_type}')
 
-    # x = 0/1 || i || j || 0 is the input to the expansion function
+    # x is the input to the expansion function
+    # 0^{32} || i || j || 0^{32}  for certificate
+    # 1^{32} || i || j || 0^{32}  for encryption key
     x = (p0 << 96) | (i << 64) | (j << 32) | 0
     f_k_x = int.from_bytes(f_k_int_x(exp, x), 'big') % SECP256R1_N
 
@@ -59,40 +84,33 @@ def main():
     i = random.randint(0, (1 << 16) - 1)
     j = random.randint(0, 19)
 
-    # Get points
-    # A = GEN_P256 * a
-    # H = GEN_P256 * h
+    print('Expanding Certificate key pair (a,A)')
+    print('------------------------------------')
 
-    # x_cert = (i * radix_32 + j) * radix_32
-    # x_enc = (((radix_32 - 1) * radix_32 + i) * radix_32 + j) * radix_32
-
-    # f_k_int_x_cert = f_k_int_x(ck, x_cert)
-    # f_k_x_cert = int.from_bytes(f_k_int_x_cert, 'big') % SECP256R1_N
-
-    print("Expanding Certificate key pair (a,A)")
-    print("------------------------------------")
-
-    # Expanded private and public keys for a
-    # a_exp = (a + f_k_x_cert) % SECP256R1_N
-    # A_exp = A + GEN_P256 * f_k_x_cert
     a_exp, A_exp = bfexpandkey(i, j, ck, a, 'cert')
-
     assert GEN_P256 * a_exp == A_exp, "error in certificate key expansion"
+
+    print(f'Expanded private key (256 bits):')
+    print(f'0x{a_exp.to_bytes(32, "big")}')
+    print(f'Expanded public key (256 bits):')
+    print(f'[0x{int(A_exp.x).to_bytes(32, "big")}, 0x{int(A_exp.y).to_bytes(32, "big")}]')
+    print()
+
     print("SUCCESS: Verified that expanded certificate private and public keys form a key pair")
     print()
 
     print("Expanding Encryption key pair (h,H)")
     print("-----------------------------------")
 
-    # f_k_int_x_enc = f_k_int_x(ek, x_enc)
-    # f_k_x_enc = int.from_bytes(f_k_int_x_enc, 'big') % SECP256R1_N
-
-    # Expanded private and public keys for h
-    # h_exp = (h + f_k_x_enc) % SECP256R1_N
-    # H_exp = H + GEN_P256 * f_k_x_enc
     h_exp, H_exp = bfexpandkey(i, j, ek, h, 'enc')
-
     assert GEN_P256 * h_exp == H_exp, "error in encryption key expansion"
+
+    print(f'Expanded private key (256 bits):')
+    print(f'0x{h_exp.to_bytes(32, "big")}')
+    print(f'Expanded public key (256 bits):')
+    print(f'[0x{int(H_exp.x).to_bytes(32, "big")}, 0x{int(H_exp.y).to_bytes(32, "big")}]')
+    print()
+
     print("SUCCESS: Verified that expanded encryption private and public keys form a key pair")
     print()
 
