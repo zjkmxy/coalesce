@@ -1,7 +1,7 @@
 # ButterflyKeys logic
 # Use Pycryptodome only
 
-import random
+import secrets
 import typing
 from Cryptodome.Cipher import AES
 from Cryptodome.PublicKey import ECC
@@ -73,16 +73,19 @@ def bfexpandkey(i: int, j: int, exp: bytes, seed_prv: int, exp_type: str = 'cert
     return prv, pub
 
 
-def main():
-    random.seed(333)
+def randint(inclusive_lower_bound, exclusive_upper_bound):
+    return (inclusive_lower_bound +
+            secrets.randbelow(exclusive_upper_bound - inclusive_lower_bound))
 
+
+def main():
     # Generate parameter
-    a = random.randint(1, SECP256R1_N - 1)
-    h = random.randint(1, SECP256R1_N - 1)
-    ck = random.getrandbits(128).to_bytes(16, 'big')
-    ek = random.getrandbits(128).to_bytes(16, 'big')
-    i = random.randint(0, (1 << 16) - 1)
-    j = random.randint(0, 19)
+    a = randint(1, SECP256R1_N - 1)
+    h = randint(1, SECP256R1_N - 1)
+    ck = secrets.randbits(128).to_bytes(16, 'big')
+    ek = secrets.randbits(128).to_bytes(16, 'big')
+    i = randint(0, (1 << 16) - 1)
+    j = randint(0, 19)
 
     print('Expanding Certificate key pair (a,A)')
     print('------------------------------------')
