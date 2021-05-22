@@ -59,6 +59,5 @@ def main():
 
     app.run_forever(after_start=after_start())
 
-
 if __name__ == '__main__':
     main()
