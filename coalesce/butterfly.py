@@ -38,73 +38,61 @@ def f_k_int_x(k: bytes, x: int) -> bytes:
     return b''.join(ret)
 
 
-def expand_key(i: int,
-               exp: bytes,
-               seed: typing.Union[int, ECC.EccPoint],
-               exp_type: str = 'cert') -> typing.Tuple[int, ECC.EccPoint]:
-    r"""
-    Butterfly expansion for 'cert' and 'enc' keys
+# def expand_key(i: int,
+#                exp: bytes,
+#                seed: typing.Union[int, ECC.EccPoint],
+#                exp_type: str = 'cert') -> typing.Tuple[int, ECC.EccPoint]:
+#     r"""
+#     Butterfly expansion for 'cert' and 'enc' keys
 
-    :param i: the ``i`` value for the corresponding certificate
-    :param exp: expansion value. An AES key (128-bit).
-    :param seed: the seed key, can be either private (1~SECP256R1_N-1) or public (EccPoint).
-    :param exp_type: the type of key expansion. "cert" (default) or "enc"
-    :return: a pair ``(pri, pub)`` of the private (if possible) and public key,
-        If ``seed`` is a private key, ``GEN_P256 * pri == pub``.
-        If ``seed`` is a public key, ``pri == 0``.
-    """
-    if exp_type == 'cert':
-        p0 = 0
-    elif exp_type == 'enc':
-        p0 = (1 << 32) - 1
-    else:
-        raise ValueError(f'Unsupported expansion type: {exp_type}')
+#     :param i: the ``i`` value for the corresponding certificate
+#     :param exp: expansion value. An AES key (128-bit).
+#     :param seed: the seed key, can be either private (1~SECP256R1_N-1) or public (EccPoint).
+#     :param exp_type: the type of key expansion. "cert" (default) or "enc"
+#     :return: a pair ``(pri, pub)`` of the private (if possible) and public key,
+#         If ``seed`` is a private key, ``GEN_P256 * pri == pub``.
+#         If ``seed`` is a public key, ``pri == 0``.
+#     """
 
-    # x is the input to the expansion function
-    # 0^{32} || i || j || 0^{32}  for certificate
-    # 1^{32} || i || j || 0^{32}  for encryption key
+#     # x is the input to the expansion function
+#     # 0^{32} || i || j || 0^{32}  for certificate
+#     # 1^{32} || i || j || 0^{32}  for encryption key
 
-    if isinstance(seed, int):
-        prv = (seed + f_k_x) % SECP256R1_N
-        seed_pub = GEN_P256 * seed
-        pub = seed_pub + GEN_P256 * f_k_x
-    elif isinstance(seed, ECC.EccPoint):
-        prv = 0
-        pub = seed + GEN_P256 * f_k_x
-    else:
-        raise ValueError(f'Unsupported seed type: {seed}')
+#     if isinstance(seed, int):
+#         prv = (seed + f_k_x) % SECP256R1_N
+#         seed_pub = GEN_P256 * seed
+#         pub = seed_pub + GEN_P256 * f_k_x
+#     elif isinstance(seed, ECC.EccPoint):
+#         prv = 0
+#         pub = seed + GEN_P256 * f_k_x
+#     else:
+#         raise ValueError(f'Unsupported seed type: {seed}')
 
-    return prv, pub
+#     return prv, pub
 
-def f_1(exp: bytes, i: int):
-    p0 = 0
-
+def f_x(p0: int, exp: bytes, i: int):
+    # TODO limit i to 64 bit, otherwise it will screw up things
     x = (p0 << 96) | (j << 32) | 0
     f_k_x = int.from_bytes(f_k_int_x(exp, x), 'big') % SECP256R1_N
 
-    pass
+
+def f_1(exp: bytes, i: int):
+    # x is the input to the expansion function
+    # 0^{32} || i || j || 0^{32}  for certificate
+    # 1^{32} || i || j || 0^{32}  for encryption key
+    return f_x(p0=0, exp, i)
 
 
 def f_2(exp: bytes, i: int):
-    p0 = (1 << 32) - 1
+    # x is the input to the expansion function
+    # 0^{32} || i || j || 0^{32}  for certificate
+    # 1^{32} || i || j || 0^{32}  for encryption key
+    return f_x(p0=(1 << 32) - 1, exp, i)
 
-    x = (p0 << 96) | (i << 64) | (j << 32) | 0
-    f_k_x = int.from_bytes(f_k_int_x(exp, x), 'big') % SECP256R1_N
 
+def f_name():
+    # need to figure out NDN name derivation function
     pass
-
-
-    if isinstance(seed, int):
-        prv = (seed + f_k_x) % SECP256R1_N
-        seed_pub = GEN_P256 * seed
-        pub = seed_pub + GEN_P256 * f_k_x
-    elif isinstance(seed, ECC.EccPoint):
-        prv = 0
-        pub = seed + GEN_P256 * f_k_x
-    else:
-        raise ValueError(f'Unsupported seed type: {seed}')
-
-
 
 ## AA: is there way to remove hard-coding of XXXX in to_bytes(XXXX, ..) below. Looks error prone...
 
@@ -186,10 +174,11 @@ class Caterpillar:
     #     return prv_key.export_key(format='DER', use_pkcs8=False)
 
 
-
+# AA: I think I want separate caterpillar public and private keys into two classes
+#     private key could be a derivative class of public
 
 @dataclass
-class Cocoon:
+class PublicCocoon:
     """Class for cocoon keys"""
     Bi: ECC.EccPoint
     Qi: ECC.EccPoint
@@ -200,12 +189,27 @@ class Cocoon:
     # h_exp_prv: int = 0
 
     @staticmethod
-    def hatch(i: int = 0):
+    def hatch(Cat: Caterpillar, i: int = 0):
         # TBD, need to figure out what this `i` will represent
 
-        # Bi
+        Bi = Cat.A + f_1(Cat.ck, i) * GEN_P256 #????  SECP256R1_N  # no clue how to write this
+        Qi = Cat.P + f_2(Cat.ek, i) * GEN_P256 #???? need fix
+
+        return PublicCocoon(Bi=Bi, Qi=Qi)
         # Qi
 
+@dataclass
+class PrivateCocoon(PublicCocoon):
+    # ???
+    pass
+
+
+class ButterflyCert:
+    pass
+
+class ButterflyKey:
+    pass
+    
     # def derive_cocoon(self, i: int = 0, j: int = 0) -> Cocoon:
     #     if i == 0:
     #         i = randint(0, (1 << 16) - 1)
