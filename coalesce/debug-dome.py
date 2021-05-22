@@ -3,8 +3,11 @@
 
 import secrets
 import typing
+from Cryptodome.Hash import SHA256
 from Cryptodome.Cipher import AES
 from Cryptodome.PublicKey import ECC
+from Cryptodome.Signature import DSS
+from Cryptodome.Protocol.KDF import HKDF
 
 # Recommended Elliptic Curve Domain Parameters
 SECP256R1_GX = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
@@ -73,9 +76,49 @@ def bfexpandkey(i: int, j: int, exp: bytes, seed_prv: int, exp_type: str = 'cert
     return prv, pub
 
 
-def randint(inclusive_lower_bound, exclusive_upper_bound):
+def randint(inclusive_lower_bound: int, exclusive_upper_bound: int) -> int:
     return (inclusive_lower_bound +
             secrets.randbelow(exclusive_upper_bound - inclusive_lower_bound))
+
+
+def ecies_encrypt(pub_key: ECC.EccKey, content: bytes) -> bytes:
+    # ephemeral key
+    ek = ECC.generate(curve='secp256r1')
+    # ek.d * pub_key.Q = ek.public_key.Q * pri_key.d
+    p = pub_key.pointQ * ek.d
+    p_bytes = int(p.x).to_bytes(32, 'big') + int(p.y).to_bytes(32, 'big')
+    ek_q = ek.public_key().pointQ
+    ek_q_bytes = int(ek_q.x).to_bytes(32, 'big') + int(ek_q.y).to_bytes(32, 'big')
+    master = ek_q_bytes + p_bytes
+    derived = HKDF(master, 32, b'', SHA256)
+    cipher = AES.new(derived, AES.MODE_GCM)
+
+    encrypted, tag = cipher.encrypt_and_digest(content)
+    ret = bytearray()
+    ret.extend(ek_q_bytes)
+    ret.extend(cipher.nonce)
+    ret.extend(tag)
+    ret.extend(encrypted)
+    return bytes(ret)
+
+
+def ecies_decrypt(pri_key: ECC.EccKey, cipher_text: bytes) -> bytes:
+    ek_q_bytes = cipher_text[0:64]
+    nonce = cipher_text[64:80]
+    tag = cipher_text[80:96]
+    encrypted = cipher_text[96:]
+
+    # ephemeral key
+    ek_q = ECC.EccPoint(x=int.from_bytes(ek_q_bytes[:32], 'big'),
+                        y=int.from_bytes(ek_q_bytes[32:], 'big'),
+                        curve='secp256r1')
+    # ek.d * pub_key.Q = ek.public_key.Q * pri_key.d
+    p = ek_q * pri_key.d
+    p_bytes = int(p.x).to_bytes(32, 'big') + int(p.y).to_bytes(32, 'big')
+    master = ek_q_bytes + p_bytes
+    derived = HKDF(master, 32, b'', SHA256)
+    cipher = AES.new(derived, AES.MODE_GCM, nonce=nonce)
+    return cipher.decrypt_and_verify(encrypted, tag)
 
 
 def main():
@@ -93,11 +136,14 @@ def main():
     a_exp, A_exp = bfexpandkey(i, j, ck, a, 'cert')
     assert GEN_P256 * a_exp == A_exp, "error in certificate key expansion"
 
-    print(f'Expanded private key (256 bits):')
-    print(f'0x{a_exp.to_bytes(32, "big")}')
-    print(f'Expanded public key (256 bits):')
-    print(f'[0x{int(A_exp.x).to_bytes(32, "big")}, 0x{int(A_exp.y).to_bytes(32, "big")}]')
-    print()
+    def print_key_pair(text, d, q):
+        print(f'{text} private key (256 bits):')
+        print(f'0x{d.to_bytes(32, "big").hex()}')
+        print(f'Expanded public key (256 bits):')
+        print(f'[0x{int(q.x).to_bytes(32, "big").hex()}, 0x{int(q.y).to_bytes(32, "big").hex()}]')
+        print()
+
+    print_key_pair('Expanded', a_exp, A_exp)
 
     print("SUCCESS: Verified that expanded certificate private and public keys form a key pair")
     print()
@@ -108,14 +154,53 @@ def main():
     h_exp, H_exp = bfexpandkey(i, j, ek, h, 'enc')
     assert GEN_P256 * h_exp == H_exp, "error in encryption key expansion"
 
-    print(f'Expanded private key (256 bits):')
-    print(f'0x{h_exp.to_bytes(32, "big")}')
-    print(f'Expanded public key (256 bits):')
-    print(f'[0x{int(H_exp.x).to_bytes(32, "big")}, 0x{int(H_exp.y).to_bytes(32, "big")}]')
-    print()
+    print_key_pair('Expanded', h_exp, H_exp)
 
     print("SUCCESS: Verified that expanded encryption private and public keys form a key pair")
     print()
+
+    print("Generating Butterfly certificates")
+    print("---------------------------------")
+
+    # CA generates certificate
+    c_prv = ECC.generate(curve='secp256r1')
+    c = int(c_prv.d)
+    C = c_prv.public_key().pointQ
+    bf_pub = A_exp + C
+    # response = c || certificate(bf_pub)
+    response = c.to_bytes(32, 'big') + int(bf_pub.x).to_bytes(32, 'big') + int(bf_pub.y).to_bytes(32, 'big')
+    res_enc = ecies_encrypt(ECC.EccKey(point=H_exp, curve='secp256r1'), response)
+
+    # Device decrypts CA's response and get certificate
+    res_dec = ecies_decrypt(ECC.EccKey(d=h_exp, curve='secp256r1'), res_enc)
+    assert res_dec == response, "error in ecies encryption"
+    recved_c = int.from_bytes(res_dec[0:32], 'big')
+    assert recved_c == c, "error in ecies encryption"
+    # In this demo we use public key directly to represent certificate
+    recved_cert = res_dec[32:]
+    assert recved_cert == int(bf_pub.x).to_bytes(32, 'big') + int(bf_pub.y).to_bytes(32, 'big')
+    bf_prv = (a_exp + c) % SECP256R1_N
+
+    print_key_pair('Generated butterfly', bf_prv, bf_pub)
+
+    # Verify bf_pri and bf_pub are paired ECC keys
+    final_prv_key = ECC.EccKey(d=bf_prv, curve='secp256r1')
+    final_pub_key = ECC.EccKey(point=bf_pub, curve='secp256r1')
+    test_msg = '''Lorem ipsum dolor sit amet,
+    consectetur adipiscing elit,
+    sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+    Ut enim ad minim veniam,
+    quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+    Duis aute irure dolor in reprehenderit in voluptate
+    velit esse cillum dolore eu fugiat nulla pariatur.
+    Excepteur sint occaecat cupidatat non proident,
+    sunt in culpa qui officia deserunt mollit anim id est laborum.
+    '''.encode('utf-8')
+    msg_hash = SHA256.new(test_msg)
+    signature = DSS.new(final_prv_key, 'fips-186-3', 'der').sign(msg_hash)
+    DSS.new(final_pub_key, 'fips-186-3', 'der').verify(msg_hash, signature)
+
+    print("SUCCESS: Verified that generated butterfly private and public keys are paired")
 
 
 if __name__ == "__main__":
