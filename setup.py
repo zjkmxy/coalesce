@@ -40,9 +40,9 @@ setup(
     keywords='NDN',
 
     packages=find_packages(exclude=['tests', 'tests.*']),
-    python_requires='>3.3',
+    python_requires='>=3.7',
 
-    install_requires=['cipher21', 'py-radix', 'python-ndn', 'pickledb'],
+    install_requires=['python-ndn>=0.3a1.post3'],
 
     extras_require={  # Optional
         'test': ['coverage'],

@@ -45,3 +45,7 @@ libs/*
 .idea
 venv/*
 
+# Temporary Caterpillar File
+temp-*.*
+**/temp-*.*
+
