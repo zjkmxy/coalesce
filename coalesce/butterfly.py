@@ -3,6 +3,7 @@ import secrets
 from dataclasses import dataclass
 from Cryptodome.Cipher import AES
 from Cryptodome.PublicKey import ECC
+import ndn.encoding as enc
 from . import ECIES
 
 
@@ -121,10 +122,15 @@ class ButterflyCert:
 
 @dataclass
 class Cocoon:
-    """Class for cocoon keys"""
+    """Class for public cocoon keys"""
     key_id: bytes  # Derived name f_name(key_id, i)
     Bi: ECC.EccPoint
     Qi: ECC.EccPoint
+
+    class Encoding(enc.TlvModel):
+        key_id = enc.BytesField(0xc1)
+        b_der = enc.BytesField(0xc2)
+        q_der = enc.BytesField(0xc3)
 
     def hatch(self) -> typing.Tuple[bytes, ButterflyCert]:
         # Algorithm 3: CertCoalesce generation
@@ -135,6 +141,20 @@ class Cocoon:
         c_bytes = c.export_key(format='DER', use_pkcs8=False)
         C = ECIES.encrypt(ECC.EccKey(point=self.Qi, curve=ECC_CURVE), c_bytes)
         return C, ButterflyCert(key_id=self.key_id, pub_key=a_i_c)
+
+    def encode_public(self) -> bytes:
+        coc = Cocoon.Encoding()
+        coc.key_id = self.key_id
+        coc.b_der = ECC.EccKey(point=self.Bi, curve=ECC_CURVE).export_key(format='DER')
+        coc.q_der = ECC.EccKey(point=self.Bi, curve=ECC_CURVE).export_key(format='DER')
+        return coc.encode()
+
+    @staticmethod
+    def decode_public(extern_key: bytes):
+        coc = Cocoon.Encoding.parse(extern_key)  # Raises ValueError, IndexError
+        b_key = ECC.import_key(bytes(coc.b_der))
+        q_key = ECC.import_key(bytes(coc.q_der))
+        return Cocoon(key_id=bytes(coc.key_id), Bi=b_key.pointQ, Qi=q_key.pointQ)
 
 
 ## AA: is there way to remove hard-coding of XXXX in to_bytes(XXXX, ..) below. Looks error prone...
@@ -151,6 +171,13 @@ class Caterpillar:
     ck: bytes
     ek: bytes
 
+    class Encoding(enc.TlvModel):
+        key_id = enc.BytesField(0xb1)
+        a_der = enc.BytesField(0xb2)
+        p_der = enc.BytesField(0xb3)
+        ck = enc.BytesField(0xb2)
+        ek = enc.BytesField(0xb3)
+
     @staticmethod
     def generate():
         # Algorithm 1: Generate Caterpillar Key
@@ -164,45 +191,45 @@ class Caterpillar:
 
         return Caterpillar(key_id=key_id, a=a, A=A, p=p, P=P, ck=ck, ek=ek)
 
-    def encode_private(self) -> bytes:
-        # XM: Should we use PKCS?
-        # AA: We need some flexible format for at least encoding (DER? or pickle).  Folding into
-        #     PKCS would be even better, but how?
-
-        # TODO: save key id
-        return b''.join([self.a.to_bytes(32, 'big'), self.p.to_bytes(32, 'big'), self.ck, self.ek])
+    def encode_private(self, passphrase: typing.Optional[str] = None) -> bytes:
+        if self.a == 0 or self.p == 0:
+            raise ValueError('Cannot encode private keys from a public caterpillar')
+        cat = Caterpillar.Encoding()
+        cat.key_id = self.key_id
+        cat.a_der = ECC.EccKey(d=self.a, curve=ECC_CURVE).export_key(format='DER', passphrase=passphrase)
+        cat.p_der = ECC.EccKey(d=self.p, curve=ECC_CURVE).export_key(format='DER', passphrase=passphrase)
+        cat.ck = self.ck
+        cat.ek = self.ek
+        return cat.encode()
 
     @staticmethod
-    def decode_private(extern_key: bytes):
-        key_id = None # extract keyId name
-        a = int.from_bytes(extern_key[0:32], 'big')
-        A = GEN_P256 * a
-        p = int.from_bytes(extern_key[32:64], 'big')
-        P = GEN_P256 * p
-        ek = extern_key[80:96]
-        ck = extern_key[64:80]
-
-        return Caterpillar(key_id=key_id, a=a, A=A, p=p, P=P, ck=ck, ek=ek)
+    def decode_private(extern_key: bytes, passphrase: typing.Optional[str] = None):
+        cat = Caterpillar.Encoding.parse(extern_key)  # Raises ValueError, IndexError
+        a_key = ECC.import_key(bytes(cat.a_der), passphrase)
+        p_key = ECC.import_key(bytes(cat.p_der), passphrase)
+        return Caterpillar(key_id=bytes(cat.key_id),
+                           a=int(a_key.d), A=a_key.pointQ,
+                           p=int(p_key.d), P=p_key.pointQ,
+                           ck=bytes(cat.ck), ek=bytes(cat.ek))
 
     def encode_public(self) -> bytes:
-        # TODO deal with keyId
-        return b''.join([int(self.A.x).to_bytes(32, 'big'), int(self.A.y).to_bytes(32, 'big'),
-                         int(self.P.x).to_bytes(32, 'big'), int(self.P.y).to_bytes(32, 'big'),
-                         self.ck, self.ek])
+        cat = Caterpillar.Encoding()
+        cat.key_id = self.key_id
+        cat.a_der = ECC.EccKey(point=self.A, curve=ECC_CURVE).export_key(format='DER')
+        cat.p_der = ECC.EccKey(point=self.P, curve=ECC_CURVE).export_key(format='DER')
+        cat.ck = self.ck
+        cat.ek = self.ek
+        return cat.encode()
 
     @staticmethod
     def decode_public(extern_key: bytes):
-        A = ECC.EccPoint(x=int.from_bytes(extern_key[0:32], 'big'),
-                         y=int.from_bytes(extern_key[32:64], 'big'),
-                         curve=ECC_CURVE)
-        P = ECC.EccPoint(x=int.from_bytes(extern_key[64:96], 'big'),
-                         y=int.from_bytes(extern_key[96:128], 'big'),
-                         curve=ECC_CURVE)
-        ck = extern_key[128:144]
-        ek = extern_key[144:160]
-
-        # TODO deal with keyId
-        return Caterpillar(key_id=None, a=0, A=A, p=0, P=P, ck=ck, ek=ek)
+        cat = Caterpillar.Encoding.parse(extern_key)  # Raises ValueError, IndexError
+        a_key = ECC.import_key(bytes(cat.a_der))
+        p_key = ECC.import_key(bytes(cat.p_der))
+        return Caterpillar(key_id=bytes(cat.key_id),
+                           a=0, A=a_key.pointQ,
+                           p=0, P=p_key.pointQ,
+                           ck=bytes(cat.ck), ek=bytes(cat.ek))
 
     def to_public(self):
         # TODO deal with keyId
