@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from Cryptodome.Cipher import AES
 from Cryptodome.PublicKey import ECC
 import ndn.encoding as enc
-from . import ECIES
+#from . import ECIES
 
 
 # Recommended Elliptic Curve Domain Parameters
@@ -102,14 +102,14 @@ def f_name(key_id: bytes, i: int) -> bytes:
 
 
 @dataclass
-class ButterflyKey:
+class CocoonsKey:
     key_id: bytes
     prv_key: ECC.EccKey
 
 
 # XM: Do we really need such a class?
 @dataclass
-class ButterflyCert:
+class CaterpillarCert:
     key_id: bytes
     pub_key: ECC.EccKey
 
@@ -121,26 +121,26 @@ class ButterflyCert:
 #     So every cocoon is public.
 
 @dataclass
-class Cocoon:
+class Caterpillar:
     """Class for public cocoon keys"""
     key_id: bytes  # Derived name f_name(key_id, i)
     Bi: ECC.EccPoint
-    Qi: ECC.EccPoint
+    #Qi: ECC.EccPoint
 
     class Encoding(enc.TlvModel):
         key_id = enc.BytesField(0xc1)
         b_der = enc.BytesField(0xc2)
         q_der = enc.BytesField(0xc3)
 
-    def hatch(self) -> typing.Tuple[bytes, ButterflyCert]:
+    def hatch(self) -> typing.Tuple[bytes, CaterpillarCert]:
         # Algorithm 3: CertCoalesce generation
         # XM: Need to sign the certificate, but this involves the application layer semantics
         #     Specifically the application namespace
         c = ECC.generate(curve=ECC_CURVE)
         a_i_c = ECC.EccKey(point=self.Bi+c.public_key().pointQ, curve=ECC_CURVE)
         c_bytes = c.export_key(format='DER', use_pkcs8=False)
-        C = ECIES.encrypt(ECC.EccKey(point=self.Qi, curve=ECC_CURVE), c_bytes)
-        return C, ButterflyCert(key_id=self.key_id, pub_key=a_i_c)
+        C = ECIES.encrypt(ECC.EccKey(point=self.P, curve=ECC_CURVE), c_bytes)
+        return C, CaterpillarCert(key_id=self.key_id, pub_key=a_i_c)
 
     def encode_public(self) -> bytes:
         coc = Cocoon.Encoding()
@@ -154,29 +154,29 @@ class Cocoon:
         coc = Cocoon.Encoding.parse(extern_key)  # Raises ValueError, IndexError
         b_key = ECC.import_key(bytes(coc.b_der))
         q_key = ECC.import_key(bytes(coc.q_der))
-        return Cocoon(key_id=bytes(coc.key_id), Bi=b_key.pointQ, Qi=q_key.pointQ)
+        return EggKeys(key_id=bytes(coc.key_id), Bi=b_key.pointQ, Qi=q_key.pointQ)
 
 
 ## AA: is there way to remove hard-coding of XXXX in to_bytes(XXXX, ..) below. Looks error prone...
 # XM: Switched to secrets.token_bytes(16)
 
 @dataclass
-class Caterpillar:
-    """Class for caterpillar keys"""
+class ButterflyKey:
+    """Class for Butterfly keys"""
     key_id: bytes  # XM: Name Component is bytes; a full name will involve application-layer semantics
     a: int
     A: ECC.EccPoint
     p: int
     P: ECC.EccPoint
     ck: bytes
-    ek: bytes
+    #ek: bytes
 
     class Encoding(enc.TlvModel):
         key_id = enc.BytesField(0xb1)
         a_der = enc.BytesField(0xb2)
         p_der = enc.BytesField(0xb3)
         ck = enc.BytesField(0xb2)
-        ek = enc.BytesField(0xb3)
+        #ek = enc.BytesField(0xb3)
 
     @staticmethod
     def generate():
@@ -187,72 +187,69 @@ class Caterpillar:
         p = randint(1, SECP256R1_N - 1)
         P = GEN_P256 * p
         ck = secrets.token_bytes(AES_KEY_BYTES)
-        ek = secrets.token_bytes(AES_KEY_BYTES)
+        #ek = secrets.token_bytes(AES_KEY_BYTES)
 
-        return Caterpillar(key_id=key_id, a=a, A=A, p=p, P=P, ck=ck, ek=ek)
+        return ButterflyKey(key_id=key_id, a=a, A=A, p=p, P=P, ck=ck)
 
     def encode_private(self, passphrase: typing.Optional[str] = None) -> bytes:
         if self.a == 0 or self.p == 0:
             raise ValueError('Cannot encode private keys from a public caterpillar')
-        cat = Caterpillar.Encoding()
+        cat = ButterflyKey.Encoding()
         cat.key_id = self.key_id
         cat.a_der = ECC.EccKey(d=self.a, curve=ECC_CURVE).export_key(format='DER', passphrase=passphrase)
         cat.p_der = ECC.EccKey(d=self.p, curve=ECC_CURVE).export_key(format='DER', passphrase=passphrase)
         cat.ck = self.ck
-        cat.ek = self.ek
         return cat.encode()
 
     @staticmethod
     def decode_private(extern_key: bytes, passphrase: typing.Optional[str] = None):
-        cat = Caterpillar.Encoding.parse(extern_key)  # Raises ValueError, IndexError
+        cat = ButterflyKey.Encoding.parse(extern_key)  # Raises ValueError, IndexError
         a_key = ECC.import_key(bytes(cat.a_der), passphrase)
         p_key = ECC.import_key(bytes(cat.p_der), passphrase)
-        return Caterpillar(key_id=bytes(cat.key_id),
+        return ButterflyKey(key_id=bytes(cat.key_id),
                            a=int(a_key.d), A=a_key.pointQ,
                            p=int(p_key.d), P=p_key.pointQ,
-                           ck=bytes(cat.ck), ek=bytes(cat.ek))
+                           ck=bytes(cat.ck))
 
     def encode_public(self) -> bytes:
-        cat = Caterpillar.Encoding()
+        cat = ButterflyKey.Encoding()
         cat.key_id = self.key_id
         cat.a_der = ECC.EccKey(point=self.A, curve=ECC_CURVE).export_key(format='DER')
         cat.p_der = ECC.EccKey(point=self.P, curve=ECC_CURVE).export_key(format='DER')
         cat.ck = self.ck
-        cat.ek = self.ek
         return cat.encode()
 
     @staticmethod
     def decode_public(extern_key: bytes):
-        cat = Caterpillar.Encoding.parse(extern_key)  # Raises ValueError, IndexError
+        cat = ButterflyKey.Encoding.parse(extern_key)  # Raises ValueError, IndexError
         a_key = ECC.import_key(bytes(cat.a_der))
         p_key = ECC.import_key(bytes(cat.p_der))
-        return Caterpillar(key_id=bytes(cat.key_id),
+        return ButterflyKey(key_id=bytes(cat.key_id),
                            a=0, A=a_key.pointQ,
                            p=0, P=p_key.pointQ,
-                           ck=bytes(cat.ck), ek=bytes(cat.ek))
+                           ck=bytes(cat.ck))
 
     def to_public(self):
         # TODO deal with keyId
-        return Caterpillar(key_id=self.key_id, a=0, A=self.A, p=0, P=self.P, ck=self.ck, ek=self.ek)
+        return ButterflyKey(key_id=self.key_id, a=0, A=self.A, p=0, P=self.P, ck=self.ck)
 
-    def cocoon(self, i: int) -> Cocoon:
+    def layingEggkeys(self, i: int) -> Caterpillar:
         # Algorithm 2: Generate Cocoon Keys from public Caterpillar
         if i < 0 or i >= (1 << 64):
             raise ValueError(f'Input {i=} should be a 64-bit integer')
-        return Cocoon(key_id=f_name(self.key_id, i),
-                      Bi=self.A + GEN_P256 * f_1(self.ck, i),
-                      Qi=self.P + GEN_P256 * f_2(self.ek, i))
+        return Caterpillar(key_id=f_name(self.key_id, i),
+                      Bi=self.A + GEN_P256 * f_1(self.ck, i))
 
-    def butterfly_prv(self, C: bytes, i: int) -> ButterflyKey:
+    def deriveCooconKeys(self, C: bytes, i: int) -> CocoonsKey:
         # Algorithm 4: Derive Butterfly Private Keys from encrypted C
         if i < 0 or i >= (1 << 64):
             raise ValueError(f'Input {i=} should be a 64-bit integer')
-        qi = (self.p + f_2(self.ek, i)) % SECP256R1_N
-        c_bytes = ECIES.decrypt(ECC.EccKey(d=qi, curve=ECC_CURVE), C)
+        #qi = (self.p + f_2(self.ek, i)) % SECP256R1_N
+        c_bytes = ECIES.decrypt(ECC.EccKey(d=self.p, curve=ECC_CURVE), C)
         c = int(ECC.import_key(c_bytes).d)
         bi = (self.a + f_1(self.ck, i)) % SECP256R1_N
         bf_prv_key = (bi + c) % SECP256R1_N
-        return ButterflyKey(key_id=f_name(self.key_id, i),
+        return CocoonsKey(key_id=f_name(self.key_id, i),
                             prv_key=ECC.EccKey(d=bf_prv_key, curve=ECC_CURVE))
 
 
