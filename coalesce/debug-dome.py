@@ -1,3 +1,4 @@
+# OBSOLETED
 # ButterflyKeys logic
 # Use Pycryptodome only
 

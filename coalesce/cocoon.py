@@ -1,7 +1,8 @@
+from dataclasses import dataclass
+from Cryptodome.PublicKey import ECC
 
 
-class CocoonsKey:
+@dataclass
+class CocoonKey:
     key_id: bytes
     prv_key: ECC.EccKey
-
-

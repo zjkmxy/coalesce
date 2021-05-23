@@ -1,3 +1,4 @@
+# OBSOLETED
 import typing
 import logging
 from hashlib import sha256

@@ -2,7 +2,14 @@
 
 TBD
 
-## How to run examples
+## New example:
+
+Run `demo.py`:
+```bash
+python3 examples/demo.py
+```
+
+## OBSOLETED
 
 Note: old python-ndn had a bug that prevents registering multiple prefixes.
 I just uploaded a deployment to fix this so you may need to upgrade: `pip3 install -U python-ndn`.
