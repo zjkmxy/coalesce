@@ -55,42 +55,79 @@ def ca_process(butterfly_pub: ButterflyKey, i_set: typing.List[int]) -> bytes:
     # Generate kaleidoscope identity 'c'
     butterfly_pub.gen_kaleidoscope()
     print(f'CA:\tGenerated kaleidoscope {int(butterfly_pub.c.d).to_bytes(32, "big").hex()[:16]}')
-    # Lay one egg & caterpillar per i
+
+    cert_names = []
+    certs = []
+    
     for i in i_set:
         cat = butterfly_pub.lay_egg(i)
         print(f'CA:\tLaid egg for i={i}.')
         # Generate caterpillar certificates per i
         cert_name, cert = cat.derive_cert(Name.from_str('/coalesce/KEY'), DigestSha256Signer(), 10000)
-        print(f'CA:\tDerived certificate: {Name.to_str(cert_name)}.')
-        pib_dict.append(cert)
+        cert_names.append(cert_name)
+        certs.append(cert)
+    print()
+
+    input("...")
+
+    # Lay one egg & caterpillar per i
+    for i in i_set:
+        print(f'CA:\tDerived certificate: {Name.to_str(cert_names[i-1])}.')
+        pib_dict.append(certs[i-1])
+
+    print()
+
+    input("...")
+
     # Return encrypted kaleidoscope identity 'c' to the client
     kaleidoscope_encrypted = butterfly_pub.encrypt_kaleidoscope()
-    print(f'CA:\tReturned with encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
+    print(f'CA:\tReturn encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
+
+    print()
+
+    input("...")
+
     return kaleidoscope_encrypted
 
 
 def device_process():
     # Generate a new butterfly
-    butterfly = ButterflyKey.generate(Component.from_str('demo'))
-    print(f'DEVICE:\tGenerated new butterfly.')
+    butterfly = ButterflyKey.generate(Component.from_str('demo-1'))
+    tmp = Name.from_str('/coalesce/KEY')
+    tmp.append(butterfly.key_id)
+    print(f'DEVICE:\tGenerated new butterfly ', Name.to_str(tmp))
+    print()
+
+    input("...")
+    
     # Derive public butterfly
     bf_pub = butterfly.to_public()
     # Send public butterfly and a set of i to CA
     i_set = list(range(1, N + 1))
     print(f'DEVICE:\tSend public butterfly and i set {i_set} to CA.')
     print()
+
+    input("...")
+
     kaleidoscope_encrypted = ca_process(bf_pub, i_set)
     print()
     print(f'DEVICE:\tReceived encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
     # Decode kaleidoscope identity 'c'
     butterfly.decrypt_kaleidoscope(kaleidoscope_encrypted)
     print(f'DEVICE:\tDecrypted kaleidoscope: {int(butterfly.c.d).to_bytes(32, "big").hex()[:16]}')
+
+    print()
+
+    input("...")
+
     # Derive cocoon private keys
     for i in i_set:
         prv_keys.append(butterfly.pupate_cocoon_key(i))
         key_name = Name.from_str('/coalesce/KEY') + [prv_keys[-1].key_id]
         print(f'DEVICE:\tAdded private key {Name.to_str(key_name)}')
     print()
+
+    input("...")
 
 
 def validation_process():
