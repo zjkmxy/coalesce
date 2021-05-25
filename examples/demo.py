@@ -1,5 +1,5 @@
 import typing
-from coalesce.butterfly import ButterflyKey
+from coalesce.butterfly import MasterKey
 from ndn import encoding as enc
 from ndn.encoding import Name, Component, SignaturePtrs
 from ndn.security import DigestSha256Signer, Sha256WithEcdsaSigner
@@ -7,6 +7,7 @@ from ndn.app_support import security_v2 as ndnsec
 from Cryptodome.Hash import SHA256
 from Cryptodome.PublicKey import ECC
 from Cryptodome.Signature import DSS
+from coalesce.utils import derive_cert
 
 
 N = 6
@@ -50,20 +51,28 @@ class bcolors:
     UNDERLINE = '\033[4m'
 
 
-def ca_process(butterfly_pub: ButterflyKey, i_set: typing.List[int]) -> bytes:
+def gen_cert(name_prefix, key_id, pub_key, signer):
+    # Derive cocoon certificate
+    public_key_der = bytes(pub_key.export_key(format='DER'))
+    cert_name, cert = derive_cert(name_prefix + [key_id], b'coalesce', public_key_der, signer, 10000)
+    return cert_name, cert
+
+
+def ca_process(butterfly_pub: MasterKey, i_set: typing.List[int]) -> bytes:
     print(f'CA:\tReceived public butterfly')
     # Generate kaleidoscope identity 'c'
-    butterfly_pub.gen_kaleidoscope()
+    butterfly_pub.random_pick_c()
     print(f'CA:\tGenerated kaleidoscope {int(butterfly_pub.c.d).to_bytes(32, "big").hex()[:16]}')
 
     cert_names = []
     certs = []
     
     for i in i_set:
-        cat = butterfly_pub.lay_egg(i)
+        cat = butterfly_pub.derive_public_key(Name.to_bytes('/coalesce/KEY'), i)
         print(f'CA:\tLaid egg for i={i}.')
         # Generate caterpillar certificates per i
-        cert_name, cert = cat.derive_cert(Name.from_str('/coalesce/KEY'), DigestSha256Signer(), 10000)
+        cert_name, cert = gen_cert(Name.from_str('/coalesce/KEY'), Component.from_str(f'demo-{i}'),
+                                   cat, DigestSha256Signer())
         cert_names.append(cert_name)
         certs.append(cert)
     print()
@@ -80,7 +89,7 @@ def ca_process(butterfly_pub: ButterflyKey, i_set: typing.List[int]) -> bytes:
     input("...")
 
     # Return encrypted kaleidoscope identity 'c' to the client
-    kaleidoscope_encrypted = butterfly_pub.encrypt_kaleidoscope()
+    kaleidoscope_encrypted = butterfly_pub.encrypt_c()
     print(f'CA:\tReturn encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
 
     print()
@@ -92,9 +101,9 @@ def ca_process(butterfly_pub: ButterflyKey, i_set: typing.List[int]) -> bytes:
 
 def device_process():
     # Generate a new butterfly
-    butterfly = ButterflyKey.generate(Component.from_str('demo-1'))
+    butterfly = MasterKey.generate()
     tmp = Name.from_str('/coalesce/KEY')
-    tmp.append(butterfly.key_id)
+    tmp.append(Component.from_str('demo'))
     print(f'DEVICE:\tGenerated new butterfly ', Name.to_str(tmp))
     print()
 
@@ -113,7 +122,7 @@ def device_process():
     print()
     print(f'DEVICE:\tReceived encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
     # Decode kaleidoscope identity 'c'
-    butterfly.decrypt_kaleidoscope(kaleidoscope_encrypted)
+    butterfly.decrypt_c(kaleidoscope_encrypted)
     print(f'DEVICE:\tDecrypted kaleidoscope: {int(butterfly.c.d).to_bytes(32, "big").hex()[:16]}')
 
     print()
@@ -122,8 +131,8 @@ def device_process():
 
     # Derive cocoon private keys
     for i in i_set:
-        prv_keys.append(butterfly.pupate_cocoon_key(i))
-        key_name = Name.from_str('/coalesce/KEY') + [prv_keys[-1].key_id]
+        prv_keys.append(butterfly.derive_private_key(Name.to_bytes('/coalesce/KEY'), i))
+        key_name = Name.from_str('/coalesce/KEY') + [Component.from_str(f'demo-{i}')]
         print(f'DEVICE:\tAdded private key {Name.to_str(key_name)}')
     print()
 
@@ -135,8 +144,8 @@ def validation_process():
     # Sign n packets
     print('Signing packets ...')
     for i in range(len(prv_keys)):
-        key_bits = prv_keys[i].prv_key.export_key(format='DER', use_pkcs8=False)
-        key_name = Name.from_str('/coalesce/KEY') + [prv_keys[i].key_id]
+        key_bits = prv_keys[i].export_key(format='DER', use_pkcs8=False)
+        key_name = Name.from_str('/coalesce/KEY') + [Component.from_str(f'demo-{i}')]
         signer = Sha256WithEcdsaSigner(key_name, key_bits)
         data = enc.make_data(f'/temp-data/{i}',
                              enc.MetaInfo(freshness_period=10000),
