@@ -1,4 +1,5 @@
 import typing
+from datetime import datetime
 from coalesce.butterfly import MasterKey
 from ndn import encoding as enc
 from ndn.encoding import Name, Component, SignaturePtrs
@@ -54,15 +55,16 @@ class bcolors:
 def gen_cert(name_prefix, key_id, pub_key, signer):
     # Derive cocoon certificate
     public_key_der = bytes(pub_key.export_key(format='DER'))
-    cert_name, cert = derive_cert(name_prefix + [key_id], b'coalesce', public_key_der, signer, 10000)
+    cert_name, cert = derive_cert(name_prefix + [key_id], b'coalesce', public_key_der, signer,
+                                  datetime.now(), 10000)
     return cert_name, cert
 
 
 def ca_process(butterfly_pub: MasterKey, i_set: typing.List[int]) -> bytes:
     print(f'CA:\tReceived public butterfly')
     # Generate kaleidoscope identity 'c'
-    butterfly_pub.random_pick_c()
-    print(f'CA:\tGenerated kaleidoscope {int(butterfly_pub.c.d).to_bytes(32, "big").hex()[:16]}')
+    butterfly_pub.pick_seed()
+    print(f'CA:\tGenerated kaleidoscope {butterfly_pub.seed.hex()}')
 
     cert_names = []
     certs = []
@@ -89,8 +91,8 @@ def ca_process(butterfly_pub: MasterKey, i_set: typing.List[int]) -> bytes:
     input("...")
 
     # Return encrypted kaleidoscope identity 'c' to the client
-    kaleidoscope_encrypted = butterfly_pub.encrypt_c()
-    print(f'CA:\tReturn encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
+    kaleidoscope_encrypted = butterfly_pub.encrypt_seed()
+    print(f'CA:\tReturn encrypted kaleidoscope: {kaleidoscope_encrypted.hex()}')
 
     print()
 
@@ -120,10 +122,10 @@ def device_process():
 
     kaleidoscope_encrypted = ca_process(bf_pub, i_set)
     print()
-    print(f'DEVICE:\tReceived encrypted kaleidoscope: {kaleidoscope_encrypted.hex()[:16]}')
+    print(f'DEVICE:\tReceived encrypted kaleidoscope: {kaleidoscope_encrypted.hex()}')
     # Decode kaleidoscope identity 'c'
-    butterfly.decrypt_c(kaleidoscope_encrypted)
-    print(f'DEVICE:\tDecrypted kaleidoscope: {int(butterfly.c.d).to_bytes(32, "big").hex()[:16]}')
+    butterfly.decrypt_seed(kaleidoscope_encrypted)
+    print(f'DEVICE:\tDecrypted kaleidoscope: {butterfly.seed.hex()}')
 
     print()
 

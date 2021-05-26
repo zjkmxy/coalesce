@@ -1,191 +1,295 @@
-# OBSOLETED
+# This file implements a proof-of-concept protocol with RBAC
+import time
 import typing
 import logging
+import secrets
+from dataclasses import dataclass
 from hashlib import sha256
 import asyncio as aio
+from datetime import datetime, timedelta
 from Cryptodome.PublicKey import ECC
 from ndn.app import NDNApp
 import ndn.encoding as enc
 import ndn.security as sec
-import ndn.app_support.security_v2 as ndnsec
 from . import butterfly as bf
-from . import ECIES
-from .utils import derive_cert
+from .utils import derive_cert, ecc_checker
 
 
-# class CaterpillarData(enc.TlvModel):
-#     ax = enc.UintField(0x81)
-#     ay = enc.UintField(0x82)
-#     hx = enc.UintField(0x83)
-#     hy = enc.UintField(0x84)
-#     ck = enc.BytesField(0x85)
-#     ek = enc.BytesField(0x86)
+# ===== Encoding =====
+
+class MasterKeyModel(enc.TlvModel):
+    name = enc.NameField()
+    is_private = enc.BoolField(0x91)
+    base_key = enc.BytesField(0x92)
+    seed = enc.BytesField(0x93)
+    start_time = enc.UintField(0x95)
+
+    @staticmethod
+    def create(name, master_key: bf.MasterKey, start_time: typing.Optional[int]):
+        ret = MasterKeyModel()
+        ret.name = enc.Name.normalize(name)
+        if master_key.base_key.has_private():
+            ret.is_private = True
+            ret.base_key = master_key.base_key.export_key(format='DER', use_pkcs8=False)
+        else:
+            ret.is_private = False
+            ret.base_key = master_key.base_key.export_key(format='DER')
+        ret.seed = master_key.seed
+        ret.start_time = start_time
+        return ret
+
+    def master_key(self) -> bf.MasterKey:
+        seed = bytes(self.seed) if self.seed is not None else None
+        return bf.MasterKey(base_key=ECC.import_key(bytes(self.base_key)),
+                            seed=seed)
 
 
 class BfRequest(enc.TlvModel):
-    cater_key_name = enc.NameField(0x91)
-    i = enc.UintField(0x92)
-    j = enc.UintField(0x93)
+    encrypted_master = enc.BytesField(0xa1)
+    encrypt_key_name = enc.BytesField(0xa2)
+
+
+class RoleModel(enc.TlvModel):
+    role_name = enc.NameField()
+    renew_interval = enc.UintField(0xb1)
 
 
 class BfResponse(enc.TlvModel):
-    cert = enc.BytesField(0xa1)
-    c_prv = enc.BytesField(0xa2)
+    status_code = enc.UintField(0xc1)
+    seed_encrypted = enc.BytesField(0xc2)
+    approved_roles = enc.RepeatedField(enc.ModelField(0xc3, RoleModel))
+    start_time = enc.UintField(0xc4)
+
+
+# ===== Key Name Related =====
+
+def gen_master_name(id_name, _key: bf.MasterKey):
+    key_id = f'KEY/coalesce-{secrets.token_hex(4)}'
+    return id_name + enc.Name.from_str(key_id)
+
+
+def derive_key_name(master_name, role_name, i):
+    master_id = enc.Component.to_str(master_name[-1])
+    device_id = master_name[-3]
+    key_id = f'KEY/{master_id}-{i}'
+    return role_name + [device_id] + enc.Name.from_str(key_id)
+
+
+# ===== Application =====
+
+@dataclass
+class Role:
+    role_name: enc.FormalName
+    key_name: enc.FormalName = None
+    private_key: ECC.EccKey = None
+    renew_interval: int = None
+    tick_cnt: int = None
 
 
 class Requester:
     app: NDNApp
-    cater: bf.Caterpillar
-    cater_id: bytes
-    cater_data: bytes
     name: enc.FormalName
+    master_key_name: enc.FormalName
+    master_key: bf.MasterKey
     ca_name: enc.FormalName
-    bf_id: bytes
-    bf_signer: enc.Signer
-    bf_cert: bytes
+    ca_public_key: ECC.EccKey
+    start_time: typing.Optional[int]
+    roles: typing.List[Role]
 
-    def __init__(self, app, caterpillar, name, ca_name):
+    master_data: bytes
+
+    def __init__(self, app, name, ca_name, ca_public_key, role_names):
         self.app = app
-        self.cater = caterpillar
-        self.name = enc.Name.normalize(name)
-        self.ca_name = enc.Name.normalize(ca_name)
-        self.cater_id = enc.Component.from_str('caterpillar-' + sha256(caterpillar.save_prv()).hexdigest()[:16])
+        self.name = name
+        self.ca_name = ca_name
+        self.ca_public_key = ECC.import_key(ca_public_key)
+        self.start_time = None
+        self.roles = []
+        for name in role_names:
+            # This is a quick and dirty hack
+            # In real world, the application should learn these from security schema
+            # Renew Interval should agree with CA
+            self.roles.append(Role(role_name=name, tick_cnt=-1,
+                                   renew_interval=10))
 
-    def generate_cater_data(self):
-        pub_key = self.cater.public_key()
-        cater_key_name = self.name + [enc.Component.from_str('KEY'), self.cater_id]
-        self.cater_data = self.app.prepare_data(
-            name=cater_key_name,
-            content=pub_key.export_pub(),
+    def load_master_key(self, blob: bytes):
+        model = MasterKeyModel.parse(blob)
+        self.master_key = model.master_key()
+        self.master_key_name = model.name
+        self.start_time = model.start_time
+
+    def save_master_key(self) -> bytes:
+        model = MasterKeyModel.create(self.master_key_name, self.master_key, self.start_time)
+        return model.encode()
+
+    def gen_master_key(self):
+        self.master_key = bf.MasterKey.generate()
+        self.master_key_name = gen_master_name(self.name, self.master_key)
+
+    def generate_master_data(self):
+        pub_key = self.master_key.to_public()
+        model = MasterKeyModel.create(self.master_key_name, pub_key, None)
+        sign_key_der = self.master_key.base_key.export_key(format='DER', use_pkcs8=False)
+        # Do we need to encrypt this with CA's KEY?
+        self.master_data = bytes(self.app.prepare_data(
+            name=self.master_key_name,
+            content=model.encode(),
             freshness_period=3600000,
             signer=sec.Sha256WithEcdsaSigner(
-                key_name=cater_key_name,
-                key_der=self.cater.sign_key()))
+                key_name=self.master_key_name,
+                key_der=sign_key_der)))
 
     def register(self):
-        self.generate_cater_data()
+        self.generate_master_data()
 
         @self.app.route(self.name + enc.Name.normalize('/KEY'))
         def on_key_int(name, _param, _app_param):
-            key_id = name[len(self.name)+1]
-            if key_id == self.cater_id:
-                self.app.put_raw_packet(self.cater_data)
-            elif key_id == self.bf_id:
-                self.app.put_raw_packet(self.bf_cert)
+            if name == self.master_key_name:
+                self.app.put_raw_packet(self.master_data)
             else:
                 logging.warning(f'Key not found: {enc.Name.to_str(name)}')
-                logging.info(f'Existing keys: {enc.Component.to_str(self.cater_id)}'
-                             f' {enc.Component.to_str(self.bf_id)}')
+                logging.info(f'Existing keys: {enc.Name.to_str(self.master_key_name)}')
 
-    async def renew(self):
-        cocoon = self.cater.derive_cocoon()
-        cater_key_name = self.name + [enc.Component.from_str('KEY'), self.cater_id]
-        req = BfRequest()
-        req.cater_key_name = cater_key_name
-        req.i = cocoon.i
-        req.j = cocoon.j
-        app_param = req.encode()
+    def renew(self):
+        if self.master_key.seed is None or not self.start_time:
+            logging.error(f'Cannot derive keys before bootstrapping with CA')
+            return
+        time_delta = int(time.time()) - self.start_time
+        for role in self.roles:
+            i = time_delta // role.renew_interval
+            if i == role.tick_cnt:
+                continue
+            role.tick_cnt = i
+            role.key_name = derive_key_name(self.master_key_name, role.role_name, i)
+            role.private_key = self.master_key.derive_private_key(enc.Name.encode(role.key_name), i)
+            logging.info(f'Renewed key {enc.Name.to_str(role.key_name)}')
 
-        # TODO: Error handling
-        data_name, _, content = await self.app.express_interest(
-            name=self.ca_name + enc.Name.from_str('/renew'),
-            app_param=app_param,
-            must_be_fresh=True,
-            can_be_prefix=False,
-            lifetime=4000,
-            signer=sec.Sha256WithEcdsaSigner(
-                key_name=cater_key_name,
-                key_der=self.cater.sign_key()))
+    async def auto_renew(self, on_renew: typing.Callable):
+        wait_time = min(role.renew_interval for role in self.roles)
+        while True:
+            self.renew()
+            on_renew()
+            await aio.sleep(wait_time)
 
-        plain_res = ECIES.decrypt(cocoon.decrypt_key(), bytes(content))
-        res = BfResponse.parse(plain_res)
-        prv_der = bytes(res.c_prv)
-        bf_prv = cocoon.butterfly_prv(ECC.import_key(prv_der))
-        cert_val = ndnsec.parse_certificate(res.cert)
-
-        self.bf_id = cert_val.name[len(self.name)+1]
-        self.bf_cert = res.cert
-        self.bf_signer = sec.Sha256WithEcdsaSigner(
-                key_name=cert_val.name,
-                key_der=bf_prv.export_key(format='DER', use_pkcs8=False))
-
-    def signer(self):
-        return self.bf_signer
+    def signer(self, i):
+        sign_key_der = self.roles[i].private_key.export_key(format='DER', use_pkcs8=False)
+        return sec.Sha256WithEcdsaSigner(key_name=self.roles[i].key_name,
+                                         key_der=sign_key_der)
 
     async def bootstrap(self):
-        cater_key_name = self.name + [enc.Component.from_str('KEY'), self.cater_id]
-        app_param = enc.Name.encode(cater_key_name)
+        app_param = enc.Name.encode(self.master_key_name)
+        sign_key_der = self.master_key.base_key.export_key(format='DER', use_pkcs8=False)
 
         # TODO: Error handling
-        _, _, _ = await self.app.express_interest(
+        _, _, content = await self.app.express_interest(
             name=self.ca_name + enc.Name.from_str('/boot'),
             app_param=app_param,
             must_be_fresh=True,
             can_be_prefix=False,
             lifetime=4000,
             signer=sec.Sha256WithEcdsaSigner(
-                key_name=cater_key_name,
-                key_der=self.cater.sign_key()))
+                key_name=self.master_key_name,
+                key_der=sign_key_der),
+            validator=ecc_checker(self.ca_public_key))
+
+        res = BfResponse.parse(content)
+        self.start_time = res.start_time
+        st_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(res.start_time))
+        logging.info(f'Bootstrap response: code={res.status_code} time={st_time}')
+        self.master_key.decrypt_seed(bytes(res.seed_encrypted))
+        for i, _ in enumerate(self.roles):
+            role = Role(role_name=self.roles[i].role_name)
+            role.renew_interval = None
+            role.tick_cnt = -1
+            for r in res.approved_roles:
+                if role.role_name != r.role_name:
+                    continue
+                role.renew_interval = r.renew_interval
+                break
+            if not role.renew_interval:
+                logging.error(f'Role {enc.Name.to_str(role.role_name)} is not approved.')
+            else:
+                logging.info(f'Role {enc.Name.to_str(role.role_name)} approved with renew time {role.renew_interval}s')
+            self.roles[i] = role
 
 
 class CaServer:
     app: NDNApp
-    cater_db: typing.Dict[bytes, bf.Caterpillar]
     name: enc.FormalName
+    role_set: typing.List[RoleModel]
+    cert_db: typing.Dict[bytes, bytes]
+    ca_prv_key: bytes
+    ca_key_name: enc.FormalName
 
-    def __init__(self, app, name):
+    def __init__(self, app, name, ca_key_name, ca_prv_key, role_names):
         self.app = app
         self.name = enc.Name.normalize(name)
-        self.cater_db = {}
+        self.role_set = []
+        self.cert_db = {}
+        self.ca_key_name = enc.Name.normalize(ca_key_name)
+        self.ca_prv_key = ca_prv_key
+        for name in role_names:
+            model = RoleModel()
+            model.role_name = name
+            model.renew_interval = 10
+            self.role_set.append(model)
 
-    def register(self):
+    async def register(self):
         @self.app.route(self.name + enc.Name.normalize('/boot'))
         def on_boot_int(name, _param, app_param):
-            cater_name = enc.Name.from_bytes(app_param)
-            logging.info(f'Bootstrap request: {enc.Name.to_str(cater_name)}')
-            aio.create_task(self.fetch_cater(cater_name))
-            self.app.put_data(name, 'OK'.encode(), freshness_period=10000)
+            master_key_name = enc.Name.from_bytes(app_param)
+            logging.info(f'Bootstrap request: {enc.Name.to_str(master_key_name)}')
+            aio.create_task(self.bootstrap(name, master_key_name))
+            # This is a PoC implementation
+            # In real world, CA should return immediately like a RPC
 
-        @self.app.route(self.name + enc.Name.normalize('/renew'))
-        def on_renew_int(name, _param, app_param):
-            req = BfRequest.parse(app_param)
-            cater_name = req.cater_key_name
-            i = req.i
-            j = req.j
+        for role in self.role_set:
+            l = len(role.role_name)
 
-            cater_id = sha256(enc.Name.to_bytes(cater_name)).digest()
-            cater = self.cater_db.get(cater_id)
-            if cater is None:
-                logging.warning(f'Renew request: {enc.Name.to_str(cater_name)} - not exist')
-                return
+            def on_cert_int(name, _param, _app_param):
+                if name[l+1] != enc.Component.from_str('KEY'):
+                    return
+                key_name = name[:l+3]
+                key_index = sha256(enc.Name.encode(key_name)).digest()
+                cert = self.cert_db.get(key_index)
+                if not cert:
+                    return
+                self.app.put_raw_packet(cert)
 
-            logging.warning(f'Renew request: {enc.Name.to_str(cater_name)} - processing')
-            self.respond_butterfly(name, cater_name, cater.derive_cocoon(i, j))
-            logging.warning(f'Renew request: {enc.Name.to_str(cater_name)} - responded')
+            await self.app.register(role.role_name, on_cert_int)
 
-    async def fetch_cater(self, cater_name):
+    async def bootstrap(self, int_name, master_key_name):
         _, _, content = await self.app.express_interest(
-            name=cater_name,
+            name=master_key_name,
             must_be_fresh=True,
             can_be_prefix=False,
             lifetime=4000)
-
-        cater_pub = bf.Caterpillar.import_pub(bytes(content))
-        cater_id = sha256(enc.Name.to_bytes(cater_name)).digest()
-        self.cater_db[cater_id] = cater_pub
-
-    def respond_butterfly(self, name, cater_name, cocoon):
-        c_prv, bf_pub = cocoon.hatch()
-        bf_id = enc.Component.from_str(f'butterfly-{cocoon.i}-{cocoon.j}')
-        key_name = cater_name[:-1] + [bf_id]
-        pub_key = bytes(bf_pub.export_key(format='DER'))
-
-        _, cert = derive_cert(key_name, b'Coalesce', pub_key, self.app.keychain.get_signer({}), expire_sec=4)
-        prv_der = c_prv.export_key(format='DER', use_pkcs8=False)
+        model = MasterKeyModel.parse(content)
+        master_key = model.master_key()
+        master_key.pick_seed()
         res = BfResponse()
-        res.cert = cert
-        res.c_prv = prv_der
-        res_wire = bytes(res.encode())
-        encrypt_res = ECIES.encrypt(cocoon.encrypt_key(), res_wire)
+        res.approved_roles = []
+        signer = sec.Sha256WithEcdsaSigner(key_name=self.ca_key_name, key_der=self.ca_prv_key)
+        for role in self.role_set:
+            # For demo, just issue 10 certificates, granting privilege for 100 seconds
+            for i in range(10):
+                key_name = derive_key_name(model.name, role.role_name, i)
+                pub_key = master_key.derive_public_key(enc.Name.encode(key_name), i)
+                pub_key_bits = pub_key.export_key(format='DER')
 
-        self.app.put_data(name, encrypt_res, freshness_period=10000)
+                start_time = datetime.utcnow()
+                delta_time = timedelta(seconds=10*i)
+                start_time += delta_time
+
+                cert_name, cert = derive_cert(key_name, b'Coalesce', pub_key_bits,
+                                              signer, start_time=start_time, expire_sec=40)
+                # Quick and dirty hack, should use the certificate name and match in real world
+                self.cert_db[sha256(bytes(enc.Name.encode(key_name))).digest()] = cert
+                logging.info(f'Issued certificate: {enc.Name.to_str(cert_name)}')
+            res.approved_roles.append(role)
+        res.status_code = 1
+        res.start_time = int(time.time())
+        res.seed_encrypted = master_key.encrypt_seed()
+        res_bytes = res.encode()
+        self.app.put_data(int_name, res_bytes, signer=signer, freshness_period=10000)
+
