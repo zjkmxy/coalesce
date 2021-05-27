@@ -44,11 +44,6 @@ class MasterKeyModel(enc.TlvModel):
                             seed=seed)
 
 
-class BfRequest(enc.TlvModel):
-    encrypted_master = enc.BytesField(0xa1)
-    encrypt_key_name = enc.BytesField(0xa2)
-
-
 class RoleModel(enc.TlvModel):
     role_name = enc.NameField()
     renew_interval = enc.UintField(0xb1)
